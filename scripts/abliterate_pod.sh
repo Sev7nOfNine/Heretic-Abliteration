@@ -57,7 +57,9 @@ hf auth login --token "$HF_TOKEN" --add-to-git-credential 2>/dev/null || \
 # --- 2. Heretic (bf16, A100 80GB) ---
 # Logs live des trials (refus + KL) dans $LOG.
 # Checkpoints d'étude dans /workspace/checkpoints (rien n'est perdu en cas de crash).
-run heretic "$BASE_MODEL" \
+# --model passé EXPLICITEMENT : sans ça, l'heuristique CLI de Heretic insère
+# --model devant le dernier argument et vole la valeur du flag précédent.
+run heretic --model "$BASE_MODEL" \
   --auto-save "$OUT_DIR" \
   --auto-max-kl 0.5 \
   --study-checkpoint-dir /workspace/checkpoints
