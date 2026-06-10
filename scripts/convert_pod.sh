@@ -40,6 +40,16 @@ run() {
 
 cd /workspace
 
+# Tous les caches HF + tmp sur le VOLUME (160 GB), pas le container disk (15 GB).
+# Lecon 10/06 : le cache xet ecrivait sur le container -> "No space left".
+# HF_HUB_DISABLE_XET evite le double-espace (tmp xet + fichier final).
+export HF_HOME=/workspace/.hf
+export HF_HUB_CACHE=/workspace/.hf/hub
+export HF_XET_CACHE=/workspace/.hf/xet
+export HF_HUB_DISABLE_XET=1
+export TMPDIR=/workspace/tmp
+mkdir -p /workspace/.hf /workspace/tmp
+
 # Garde anti-boucle : RunPod relance le conteneur a chaque exit. Sans ca,
 # un echec se rejoue a l'infini et brule du credit (lecon 10/06, ~95 boucles).
 if [ -f /workspace/FAILED ]; then
