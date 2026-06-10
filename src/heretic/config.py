@@ -113,6 +113,27 @@ class Settings(BaseSettings):
         exclude=True,
     )
 
+    auto_save: str | None = Field(
+        default=None,
+        description=(
+            "If this directory path is set, run fully non-interactively: after optimization, "
+            "automatically select the Pareto-optimal trial with the fewest refusals whose "
+            "KL divergence does not exceed auto_max_kl (falling back to the lowest-KL trial "
+            "if none qualifies), save the merged decensored model to this directory, and exit. "
+            "The full Pareto front is printed so a different trial can be regenerated later "
+            "from the study checkpoint without re-running the optimization."
+        ),
+        exclude=True,
+    )
+
+    auto_max_kl: float = Field(
+        default=0.5,
+        description=(
+            "Maximum acceptable KL divergence for automatic trial selection in auto_save mode. "
+            "Values above 0.5 usually indicate significant damage to the original model's capabilities."
+        ),
+    )
+
     dtypes: list[str] = Field(
         default=[
             # In practice, "auto" almost always means bfloat16.

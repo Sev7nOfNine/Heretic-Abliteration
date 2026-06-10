@@ -662,6 +662,72 @@ def run():
                 min_divergence = kl_divergence
                 best_trials.append(trial)
 
+        if settings.auto_save:
+            # Non-interactive mode: log the full Pareto front, select a trial
+            # automatically, save the merged model, and exit.
+            print()
+            print("[bold green]Optimization finished![/] (auto_save mode)")
+            print()
+            print("Pareto front (all candidates, regenerable from the study checkpoint):")
+            for trial in best_trials:
+                print(
+                    f"  [Trial {trial.user_attrs['index']:>3}] "
+                    f"Refusals: {trial.user_attrs['refusals']:>2}/{len(evaluator.bad_prompts)}, "
+                    f"KL divergence: {trial.user_attrs['kl_divergence']:.4f}"
+                )
+
+            # best_trials is sorted by (refusals, kl_divergence) ascending, so the
+            # first trial within the KL budget has the fewest refusals among them.
+            eligible = [
+                trial
+                for trial in best_trials
+                if trial.user_attrs["kl_divergence"] <= settings.auto_max_kl
+            ]
+            if eligible:
+                chosen = eligible[0]
+            else:
+                # No trial respects the KL budget: preserve the model's brain over
+                # decensoring strength by taking the lowest-divergence candidate.
+                chosen = min(
+                    best_trials, key=lambda t: t.user_attrs["kl_divergence"]
+                )
+                print()
+                print(
+                    f"[yellow]WARNING: no Pareto-optimal trial has KL divergence <= {settings.auto_max_kl}; "
+                    f"falling back to the lowest-KL trial.[/]"
+                )
+
+            print()
+            print(
+                f"Auto-selected [bold]Trial {chosen.user_attrs['index']}[/] "
+                f"(refusals: {chosen.user_attrs['refusals']}/{len(evaluator.bad_prompts)}, "
+                f"KL divergence: {chosen.user_attrs['kl_divergence']:.4f})"
+            )
+
+            print("* Resetting model...")
+            model.reset_model()
+            print("* Abliterating...")
+            model.abliterate(
+                refusal_directions,
+                chosen.user_attrs["direction_index"],
+                {
+                    k: AbliterationParameters(**v)
+                    for k, v in chosen.user_attrs["parameters"].items()
+                },
+            )
+
+            print("Saving merged model...")
+            merged_model = model.get_merged_model()
+            merged_model.save_pretrained(
+                settings.auto_save,
+                max_shard_size=settings.max_shard_size,
+            )
+            del merged_model
+            empty_cache()
+            model.tokenizer.save_pretrained(settings.auto_save)
+            print(f"Model saved to [bold]{settings.auto_save}[/].")
+            return
+
         choices = [
             Choice(
                 title=(
