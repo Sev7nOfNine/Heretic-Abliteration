@@ -38,8 +38,19 @@ run() { echo "[step] $*" | tee -a "$LOG"; "$@" 2>&1 | tee -a "$LOG"; }
 
 cd /workspace
 
+# Garde anti-boucle : si un run précédent a échoué sur ce volume, ne pas
+# recommencer en boucle (RunPod redémarre le conteneur à chaque exit).
+if [ -f /workspace/FAILED ]; then
+  echo "[garde] Echec précédent détecté, attente d'intervention manuelle."
+  sleep infinity
+fi
+
 # --- 1. Dépendances (fork Mel avec le mode --auto-save) ---
-run pip install -q -U "git+https://github.com/Sev7nOfNine/Heretic-Abliteration.git@master" "huggingface_hub[cli]"
+# kernels ÉPINGLÉ à 0.14.1 : kernels 0.15.x casse transformers 5.x
+# (ValueError "Either a revision or a version must be specified" dans hub_kernels).
+# Reproduit et validé en venv local le 2026-06-10.
+run pip install -q -U "git+https://github.com/Sev7nOfNine/Heretic-Abliteration.git@master" huggingface_hub
+run pip install -q "kernels==0.14.1"
 hf auth login --token "$HF_TOKEN" --add-to-git-credential 2>/dev/null || \
   huggingface-cli login --token "$HF_TOKEN" 2>/dev/null || true
 
@@ -53,6 +64,7 @@ run heretic "$BASE_MODEL" \
 
 if [ ! -d "$OUT_DIR" ] || [ -z "$(ls -A "$OUT_DIR" 2>/dev/null)" ]; then
   echo "[ERREUR] Pas de modèle sauvé par Heretic — voir $LOG" | tee -a "$LOG"
+  touch /workspace/FAILED
   exit 1
 fi
 
