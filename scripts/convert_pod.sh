@@ -33,18 +33,36 @@ run() {
   echo "[step] $*" | tee -a "$LOG"
   if ! "$@" 2>&1 | tee -a "$LOG"; then
     echo "[ERREUR] echec de: $*" | tee -a "$LOG"
+    touch /workspace/FAILED
     exit 1
   fi
 }
 
 cd /workspace
 
+# Garde anti-boucle : RunPod relance le conteneur a chaque exit. Sans ca,
+# un echec se rejoue a l'infini et brule du credit (lecon 10/06, ~95 boucles).
+if [ -f /workspace/FAILED ]; then
+  echo "[garde] Echec precedent (FAILED) — attente, pas de re-boucle." | tee -a "$LOG"
+  trap - EXIT
+  curl -s -X DELETE -H "Authorization: Bearer $RUNPOD_API_KEY" \
+    "https://rest.runpod.io/v1/pods/${RUNPOD_POD_ID}" || true
+  sleep infinity
+fi
+
 run pip install -q -U huggingface_hub
 
 # --- 1. Telecharger le modele ablitere depuis HF ---
-if [ ! -f /workspace/heretic-out/config.json ]; then
+# Download COMPLET tant que le tokenizer manque (lecon 10/06 : un download
+# partiel laissait config.json mais pas tokenizer.json -> conversion en boucle).
+# hf download est idempotent : il complete les fichiers manquants, ne re-DL pas
+# ce qui est deja la et valide.
+if [ ! -f /workspace/heretic-out/tokenizer.json ] || [ ! -f /workspace/heretic-out/config.json ]; then
   run hf download "$HF_REPO_MODEL" --local-dir /workspace/heretic-out
 fi
+# Garde-fou : on n'avance pas sans le tokenizer.
+[ -f /workspace/heretic-out/tokenizer.json ] || {
+  echo "[ERREUR] tokenizer.json absent apres download" | tee -a "$LOG"; exit 1; }
 
 # --- 2. llama.cpp : converter + quantize ---
 if [ ! -d /workspace/llama.cpp ]; then
