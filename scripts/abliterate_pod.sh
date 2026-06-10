@@ -14,8 +14,8 @@ set -uo pipefail
 
 BASE_MODEL="google/gemma-4-26B-A4B-it"
 OUT_DIR="/workspace/heretic-out"
-HF_REPO_MODEL="SevenOfNine/Ada-Gemma-4-26B-A4B-it-abliterated"
-HF_REPO_GGUF="SevenOfNine/Ada-Gemma-4-26B-A4B-it-abliterated-GGUF"
+HF_REPO_MODEL="SevenOfNine/Gemma-4-26B-A4B-It-Abliterated"
+HF_REPO_GGUF="SevenOfNine/Gemma-4-26B-A4B-It-Abliterated-GGUF"
 LOG="/workspace/abliterate.log"
 
 shutdown_pod() {
@@ -87,7 +87,7 @@ rm -rf "$OUT_DIR" ~/.cache/huggingface/hub 2>/dev/null
 
 for Q in Q5_K_M Q6_K; do
   run /workspace/llama.cpp/build/bin/llama-quantize /workspace/ada-bf16.gguf "/workspace/ada-${Q}.gguf" "$Q"
-  run hf upload "$HF_REPO_GGUF" "/workspace/ada-${Q}.gguf" "Ada-Gemma-4-26B-A4B-it-abliterated-${Q}.gguf" --private
+  run hf upload "$HF_REPO_GGUF" "/workspace/ada-${Q}.gguf" "Gemma-4-26B-A4B-It-Abliterated-${Q}.gguf" --private
   rm -f "/workspace/ada-${Q}.gguf"
 done
 
@@ -96,7 +96,7 @@ python - <<'EOF' | tee -a "$LOG"
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-files = [s.rfilename for s in api.model_info("SevenOfNine/Ada-Gemma-4-26B-A4B-it-abliterated-GGUF", files_metadata=True).siblings]
+files = [s.rfilename for s in api.model_info("SevenOfNine/Gemma-4-26B-A4B-It-Abliterated-GGUF", files_metadata=True).siblings]
 ok = all(any(q in f for f in files) for q in ("Q5_K_M", "Q6_K"))
 print("[verif] fichiers HF:", files)
 print("[verif]", "UPLOAD COMPLET OK" if ok else "UPLOAD INCOMPLET !!")
