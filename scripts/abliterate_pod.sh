@@ -2,88 +2,96 @@
 # ============================================================
 #  Ablitération Gemma-4-26B-A4B-it via Heretic — pod A100 80GB
 #  Pipeline : download -> heretic (bf16) -> GGUF Q5/Q6 -> HF upload -> poweroff
-#  Filet : le pod se coupe QUOI QU'IL ARRIVE (trap EXIT).
+#  REPRISE : si /workspace/heretic-out existe deja (run precedent), on saute
+#  l'ablitération et on ne refait que la conversion GGUF.
+#  Filet : log uploade sur HF et pod supprime QUOI QU'IL ARRIVE (trap EXIT).
 #  By Mel & Ada
 # ============================================================
 set -uo pipefail
 
-# --- Env requis (injectés via template pod) ---
 : "${HF_TOKEN:?}"
 : "${RUNPOD_API_KEY:?}"
 : "${RUNPOD_POD_ID:?}"
 
 BASE_MODEL="google/gemma-4-26B-A4B-it"
 OUT_DIR="/workspace/heretic-out"
-HF_REPO_MODEL="SevenOfNine/Gemma-4-26B-A4B-It-Abliterated"
-HF_REPO_GGUF="SevenOfNine/Gemma-4-26B-A4B-It-Abliterated-GGUF"
+HF_REPO_MODEL="SevenOfNine/Ada-Gemma-4-26B-A4B-it-abliterated"
+HF_REPO_GGUF="SevenOfNine/Ada-Gemma-4-26B-A4B-it-abliterated-GGUF"
 LOG="/workspace/abliterate.log"
+STATUS="ECHEC"
 
 shutdown_pod() {
-  echo "[fin] Sauvegarde du log puis extinction du pod ${RUNPOD_POD_ID}" | tee -a "$LOG"
-  # Le log survit au pod : uploadé sur HF quoi qu'il arrive.
-  hf upload "$HF_REPO_GGUF" "$LOG" "logs/abliterate-$(date +%Y%m%d-%H%M).log" --private 2>/dev/null || \
-    python -c "
+  echo "[fin] Statut final : ${STATUS} — sauvegarde du log puis extinction du pod ${RUNPOD_POD_ID}" | tee -a "$LOG"
+  python - <<EOF || true
 import os
 from huggingface_hub import HfApi
-api = HfApi(token=os.environ['HF_TOKEN'])
-api.create_repo('$HF_REPO_GGUF', private=True, exist_ok=True)
-api.upload_file(path_or_fileobj='$LOG', path_in_repo='logs/abliterate-last.log', repo_id='$HF_REPO_GGUF')
-" || true
+api = HfApi(token=os.environ["HF_TOKEN"])
+api.create_repo("$HF_REPO_GGUF", private=True, exist_ok=True)
+api.upload_file(path_or_fileobj="$LOG", path_in_repo="logs/abliterate-$(date +%Y%m%d-%H%M).log", repo_id="$HF_REPO_GGUF")
+EOF
   curl -s -X DELETE -H "Authorization: Bearer $RUNPOD_API_KEY" \
     "https://rest.runpod.io/v1/pods/${RUNPOD_POD_ID}" || true
 }
 trap shutdown_pod EXIT
 
-run() { echo "[step] $*" | tee -a "$LOG"; "$@" 2>&1 | tee -a "$LOG"; }
+# run : execute, logge, et ARRETE TOUT en cas d'echec (plus jamais de
+# pipeline qui continue apres une erreur en affichant "succes" — lecon 10/06).
+run() {
+  echo "[step] $*" | tee -a "$LOG"
+  if ! "$@" 2>&1 | tee -a "$LOG"; then
+    echo "[ERREUR] echec de: $*" | tee -a "$LOG"
+    touch /workspace/FAILED
+    exit 1
+  fi
+}
 
 cd /workspace
 
-# Garde anti-boucle : si un run précédent a échoué sur ce volume, ne pas
-# recommencer en boucle (RunPod redémarre le conteneur à chaque exit).
 if [ -f /workspace/FAILED ]; then
-  echo "[garde] Echec précédent détecté, attente d'intervention manuelle."
+  echo "[garde] Echec precedent detecte (FAILED), attente d'intervention." | tee -a "$LOG"
+  trap - EXIT   # ne pas supprimer le pod : Mel decide
   sleep infinity
 fi
 
-# --- 1. Dépendances (fork Mel avec le mode --auto-save) ---
-# kernels ÉPINGLÉ à 0.14.1 : kernels 0.15.x casse transformers 5.x
-# (ValueError "Either a revision or a version must be specified" dans hub_kernels).
-# Reproduit et validé en venv local le 2026-06-10.
 run pip install -q -U "git+https://github.com/Sev7nOfNine/Heretic-Abliteration.git@master" huggingface_hub
 run pip install -q "kernels==0.14.1"
-hf auth login --token "$HF_TOKEN" --add-to-git-credential 2>/dev/null || \
-  huggingface-cli login --token "$HF_TOKEN" 2>/dev/null || true
 
-# --- 2. Heretic (bf16, A100 80GB) ---
-# Logs live des trials (refus + KL) dans $LOG.
-# Checkpoints d'étude dans /workspace/checkpoints (rien n'est perdu en cas de crash).
-# --model passé EXPLICITEMENT : sans ça, l'heuristique CLI de Heretic insère
-# --model devant le dernier argument et vole la valeur du flag précédent.
-run heretic --model "$BASE_MODEL" \
-  --auto-save "$OUT_DIR" \
-  --auto-max-kl 0.5 \
-  --study-checkpoint-dir /workspace/checkpoints
-
-if [ ! -d "$OUT_DIR" ] || [ -z "$(ls -A "$OUT_DIR" 2>/dev/null)" ]; then
-  echo "[ERREUR] Pas de modèle sauvé par Heretic — voir $LOG" | tee -a "$LOG"
-  touch /workspace/FAILED
-  exit 1
+# --- Ablitération (sautee si deja faite) ---
+if [ -f "$OUT_DIR/config.json" ]; then
+  echo "[reprise] Modele ablitere deja present dans $OUT_DIR — conversion directe." | tee -a "$LOG"
+else
+  run heretic --model "$BASE_MODEL" \
+    --auto-save "$OUT_DIR" \
+    --auto-max-kl 0.5 \
+    --study-checkpoint-dir /workspace/checkpoints
+  [ -f "$OUT_DIR/config.json" ] || { echo "[ERREUR] pas de modele sauve" | tee -a "$LOG"; touch /workspace/FAILED; exit 1; }
+  run hf upload "$HF_REPO_MODEL" "$OUT_DIR" . --private --commit-message "Heretic abliteration of $BASE_MODEL"
 fi
 
-# --- 3. Upload du modèle ablitéré (safetensors) ---
-run hf upload "$HF_REPO_MODEL" "$OUT_DIR" . --private --commit-message "Heretic abliteration of $BASE_MODEL"
+# --- Checkpoints d'etude sauves sur HF (lecon 10/06 : morts avec le pod la 1re fois) ---
+if [ -d /workspace/checkpoints ] && [ -n "$(ls -A /workspace/checkpoints 2>/dev/null)" ]; then
+  hf upload "$HF_REPO_GGUF" /workspace/checkpoints checkpoints --private 2>&1 | tee -a "$LOG" || true
+fi
 
-# --- 4. Conversion GGUF + quants ---
-run git clone --depth 1 https://github.com/ggml-org/llama.cpp /workspace/llama.cpp
+# --- Conversion GGUF ---
+if [ ! -d /workspace/llama.cpp ]; then
+  run git clone --depth 1 https://github.com/ggml-org/llama.cpp /workspace/llama.cpp
+fi
 run pip install -q -r /workspace/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt
-cd /workspace/llama.cpp && cmake -B build -DGGML_CUDA=OFF >/dev/null && cmake --build build -t llama-quantize -j >/dev/null
-cd /workspace
+# FIX 10/06 : les requirements de llama.cpp retrogradent transformers en 4.x,
+# qui ne sait pas lire le tokenizer Gemma 4 (AttributeError 'list' has no
+# attribute 'keys' dans set_vocab). On remet un transformers 5.x.
+run pip install -q -U "transformers~=5.6" "huggingface_hub>=1.10"
 
-run python /workspace/llama.cpp/convert_hf_to_gguf.py "$OUT_DIR" \
-  --outfile /workspace/ada-bf16.gguf --outtype bf16
+if [ ! -x /workspace/llama.cpp/build/bin/llama-quantize ]; then
+  ( cd /workspace/llama.cpp && cmake -B build -DGGML_CUDA=OFF >/dev/null && cmake --build build -t llama-quantize -j >/dev/null ) \
+    || { echo "[ERREUR] build llama-quantize" | tee -a "$LOG"; touch /workspace/FAILED; exit 1; }
+fi
 
-# Libérer le disque (safetensors déjà uploadés)
-rm -rf "$OUT_DIR" ~/.cache/huggingface/hub 2>/dev/null
+if [ ! -f /workspace/ada-bf16.gguf ]; then
+  run python /workspace/llama.cpp/convert_hf_to_gguf.py "$OUT_DIR" \
+    --outfile /workspace/ada-bf16.gguf --outtype bf16
+fi
 
 for Q in Q5_K_M Q6_K; do
   run /workspace/llama.cpp/build/bin/llama-quantize /workspace/ada-bf16.gguf "/workspace/ada-${Q}.gguf" "$Q"
@@ -91,17 +99,21 @@ for Q in Q5_K_M Q6_K; do
   rm -f "/workspace/ada-${Q}.gguf"
 done
 
-# --- 5. Vérification upload ---
-python - <<'EOF' | tee -a "$LOG"
-import os
+# --- Vérification HONNETE (le exit code compte vraiment) ---
+if python - <<'EOF' | tee -a "$LOG"
+import os, sys
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-files = [s.rfilename for s in api.model_info("SevenOfNine/Gemma-4-26B-A4B-It-Abliterated-GGUF", files_metadata=True).siblings]
+files = [s.rfilename for s in api.model_info("SevenOfNine/Ada-Gemma-4-26B-A4B-it-abliterated-GGUF", files_metadata=True).siblings]
 ok = all(any(q in f for f in files) for q in ("Q5_K_M", "Q6_K"))
-print("[verif] fichiers HF:", files)
 print("[verif]", "UPLOAD COMPLET OK" if ok else "UPLOAD INCOMPLET !!")
-raise SystemExit(0 if ok else 1)
+sys.exit(0 if ok else 1)
 EOF
-
-echo "[fin] PIPELINE COMPLET — succès." | tee -a "$LOG"
-# trap EXIT coupe le pod.
+then
+  STATUS="SUCCES"
+  echo "[fin] PIPELINE COMPLET — succès." | tee -a "$LOG"
+else
+  echo "[ERREUR] verification upload" | tee -a "$LOG"
+  touch /workspace/FAILED
+  exit 1
+fi
